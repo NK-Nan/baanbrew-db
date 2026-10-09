@@ -2,12 +2,15 @@
 //   firestoreSource  ใช้ Firestore จริง (onSnapshot = real-time)
 //   demoSource       จำลองในหน่วยความจำ สำหรับคนที่ยังสร้าง Firebase ไม่ได้ (เปิดด้วย ?demo)
 import {
-  collection, query, where, orderBy, onSnapshot, getDocs, doc, setDoc, serverTimestamp,
+  collection, query, where, orderBy, onSnapshot, getDocs, getDoc, doc, setDoc, serverTimestamp,
 } from "firebase/firestore";
 import { onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
 import { db, auth, googleProvider } from "./firebase.js";
 import { selectLastDays, computeShift, toSaleDoc } from "../../scripts/seedTransform.mjs";
 import { todayBangkok } from "./time.js";
+import { buildDemoAnalytics } from "../lab4/demoAnalytics.js";
+
+const ANALYTICS_DOCS = ["meta", "daily", "rfm", "cohort", "abc"];
 
 export const firestoreSource = {
   mode: "firebase",
@@ -36,10 +39,27 @@ export const firestoreSource = {
   },
 
   addSale: ({ id, data }) => setDoc(doc(db, "sales", id), { ...data, created_at: serverTimestamp() }),
+
+  /** Lab 4 · อ่านผลวิเคราะห์ที่ pipeline สร้างไว้ 5 เอกสาร (5 reads แทนยอดขายดิบหลายหมื่นเอกสาร) */
+  async loadAnalytics() {
+    const snaps = await Promise.all(ANALYTICS_DOCS.map((k) => getDoc(doc(db, "analytics", k))));
+    if (!snaps[0].exists()) {
+      const e = new Error("ยังไม่มีผลวิเคราะห์ใน Firestore รัน npm run analytics ก่อน");
+      e.code = "not-built";
+      throw e;
+    }
+    const out = { reads: snaps.length };
+    snaps.forEach((s, i) => {
+      out[ANALYTICS_DOCS[i]] = s.exists() ? s.data() : { error: `ไม่พบเอกสาร analytics/${ANALYTICS_DOCS[i]}` };
+    });
+    const built = out.meta.builtAt?.toDate?.();
+    out.meta = { ...out.meta, builtAt: built ? built.toISOString() : null };
+    return out;
+  },
 };
 
 // ---------------- โหมดสาธิต ----------------
-export function createDemoSource(csvRows, productRows) {
+export function createDemoSource(csvRows, productRows, holidays = {}) {
   const { rows, end } = selectLastDays(csvRows, 90);
   const shift = computeShift(end, todayBangkok());
   const docs = new Map(rows.map((r) => toSaleDoc(r, shift)).map((d) => [d.id, d.data]));
@@ -61,6 +81,7 @@ export function createDemoSource(csvRows, productRows) {
     onAuth: (cb) => { authCb = cb; cb(signedIn ? user : null); return () => { authCb = null; }; },
     signIn: async () => { signedIn = true; authCb?.(user); },
     signOut: async () => { signedIn = false; authCb?.(null); },
+    loadAnalytics: async () => buildDemoAnalytics(csvRows, productRows, holidays),
     loadProducts: async () => productRows.map((p) => ({ ...p, price: Number(p.price), cost: Number(p.cost) })),
     subscribeSales({ start, end }, onData) {
       const l = { start, end, onData };
